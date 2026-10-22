@@ -1,0 +1,825 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#101010">
+  <title>Barbería VIP | Administración</title>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.49.1/dist/umd/supabase.min.js"></script>
+
+  <!--
+    CONFIGURACIÓN DE SUPABASE (UNA SOLA VEZ)
+
+    1. En Authentication > Users, crea el usuario del dueño con correo
+       y contraseña. Copia su UUID.
+
+    2. Ejecuta el siguiente SQL en el SQL Editor, reemplazando TODAS
+       las apariciones de REEMPLAZA_UUID_DEL_DUENO por ese UUID.
+
+       Se asume que public.citas ya existe con las columnas solicitadas.
+       Revisa y elimina políticas anteriores que otorguen acceso público
+       a SELECT, UPDATE o DELETE: las políticas permisivas se acumulan.
+
+    ---------------------------- SQL ----------------------------
+
+    alter table public.citas enable row level security;
+
+    grant usage on schema public to anon, authenticated;
+    revoke all on table public.citas from anon, authenticated;
+    grant insert on table public.citas to anon;
+    grant select, update, delete on table public.citas to authenticated;
+
+    -- Habilita la secuencia del id serial sin asumir su nombre.
+    do $$
+    declare
+      sequence_name text;
+    begin
+      sequence_name := pg_get_serial_sequence('public.citas', 'id');
+      if sequence_name is not null then
+        execute format(
+          'grant usage on sequence %s to anon',
+          sequence_name
+        );
+      end if;
+    end $$;
+
+    drop policy if exists vip_public_insert on public.citas;
+    create policy vip_public_insert
+    on public.citas for insert to anon
+    with check (
+      estado = 'Pendiente'
+      and char_length(trim(cliente)) between 2 and 100
+      and telefono ~ '^[+][1-9][0-9]{7,14}$'
+      and servicio in ('Corte $200', 'Barba $150', 'Combo VIP $300')
+      and barbero in ('Carlos', 'Miguel', 'Alex')
+      and fecha ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+      and hora ~ '^(1[0-9]):(00|30)$'
+    );
+
+    drop policy if exists vip_owner_select on public.citas;
+    create policy vip_owner_select
+    on public.citas for select to authenticated
+    using ((select auth.uid()) = 'REEMPLAZA_UUID_DEL_DUENO'::uuid);
+
+    drop policy if exists vip_owner_update on public.citas;
+    create policy vip_owner_update
+    on public.citas for update to authenticated
+    using ((select auth.uid()) = 'REEMPLAZA_UUID_DEL_DUENO'::uuid)
+    with check ((select auth.uid()) = 'REEMPLAZA_UUID_DEL_DUENO'::uuid);
+
+    drop policy if exists vip_owner_delete on public.citas;
+    create policy vip_owner_delete
+    on public.citas for delete to authenticated
+    using ((select auth.uid()) = 'REEMPLAZA_UUID_DEL_DUENO'::uuid);
+
+    -- Agrega la tabla a Realtime si todavía no está incluida.
+    do $$
+    begin
+      if not exists (
+        select 1
+        from pg_publication_tables
+        where pubname = 'supabase_realtime'
+          and schemaname = 'public'
+          and tablename = 'citas'
+      ) then
+        alter publication supabase_realtime add table public.citas;
+      end if;
+    end $$;
+
+    -------------------------- FIN SQL --------------------------
+
+    3. Reemplaza SUPABASE_URL y SUPABASE_ANON_KEY al final de este HTML.
+
+    Nunca coloques aquí una clave service_role.
+    La autorización efectiva del dueño la realizan las políticas RLS.
+
+    Este sistema registra solicitudes: no impide reservas simultáneas
+    del mismo horario. Para garantizar exclusividad se necesita una
+    restricción o lógica transaccional adicional en la base de datos.
+  -->
+
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #101010;
+      --panel: #1b1b1b;
+      --gold: #dab675;
+      --text: #f7f4ed;
+      --muted: #aaa79f;
+      --border: #38342c;
+    }
+
+    * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.5;
+    }
+
+    main { width: min(100% - 40px, 1250px); margin: auto; padding: 35px 0; }
+
+    header, .toolbar, .card-head, .stats, .actions {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    header { justify-content: space-between; margin-bottom: 28px; }
+    .brand { color: var(--gold); letter-spacing: .18em; font-size: 12px; font-weight: 800; }
+    h1 { font-size: clamp(25px, 4vw, 36px); margin: 6px 0; }
+    h2 { margin: 0; font-size: 20px; }
+    p { margin: 8px 0; }
+    .muted { color: var(--muted); font-size: 14px; }
+
+    button, input, a { font: inherit; }
+
+    button, .button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      min-height: 42px;
+      padding: 10px 15px;
+      border: 1px solid #494338;
+      border-radius: 9px;
+      background: #26231e;
+      color: var(--text);
+      text-decoration: none;
+      font-weight: 650;
+      font-size: 13px;
+      cursor: pointer;
+    }
+
+    button:hover, .button:hover { filter: brightness(1.15); }
+    button:disabled { opacity: .5; cursor: default; }
+    button.primary { background: var(--gold); color: #19140e; border: 0; }
+    .danger { color: #ffb6bd; border-color: #6a343b; background: #381e23; }
+    .whatsapp { color: #b5efc8; border-color: #315d40; background: #183323; }
+
+    input {
+      width: 100%;
+      min-height: 47px;
+      padding: 12px;
+      background: #111;
+      color: var(--text);
+      border: 1px solid #494338;
+      border-radius: 9px;
+    }
+
+    button:focus-visible, a:focus-visible, input:focus-visible {
+      outline: 2px solid var(--gold);
+      outline-offset: 3px;
+    }
+
+    .login {
+      max-width: 430px;
+      margin: 55px auto;
+      padding: 30px;
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      background: var(--panel);
+    }
+
+    form { display: grid; gap: 18px; margin-top: 24px; }
+    label { display: grid; gap: 7px; font-size: 14px; }
+
+    .toolbar {
+      justify-content: space-between;
+      margin-bottom: 23px;
+      padding: 18px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+    }
+
+    .stats { gap: 22px; }
+    .stats strong { color: var(--gold); font-size: 22px; margin-right: 5px; }
+    .stats span { color: var(--muted); font-size: 13px; }
+
+    #connection {
+      display: inline-block;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    #connection.live { color: #91d8af; }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(min(100%, 330px), 1fr));
+      gap: 18px;
+    }
+
+    .card {
+      border: 1px solid var(--border);
+      background: var(--panel);
+      border-radius: 16px;
+      padding: 22px;
+      overflow-wrap: anywhere;
+    }
+
+    .card-head { justify-content: space-between; align-items: start; }
+    .card h2 { font-size: 19px; }
+    .id { color: var(--muted); font-size: 12px; }
+
+    .badge {
+      border-radius: 30px;
+      font-size: 11px;
+      padding: 5px 10px;
+      background: #443721;
+      color: #f2d399;
+    }
+
+    .badge.done { background: #1d3b2b; color: #b4e9c8; }
+
+    dl {
+      display: grid;
+      grid-template-columns: 85px minmax(0, 1fr);
+      gap: 9px 12px;
+      font-size: 14px;
+      margin: 22px 0;
+    }
+
+    dt { color: var(--muted); }
+    dd { margin: 0; }
+    .actions { border-top: 1px solid var(--border); padding-top: 16px; }
+    .created { margin-top: 15px; color: var(--muted); font-size: 11px; }
+
+    .message {
+      margin: 16px 0;
+      padding: 13px 16px;
+      background: #27231a;
+      color: #f2d399;
+      border-radius: 10px;
+      overflow-wrap: anywhere;
+    }
+
+    .message:empty { display: none; }
+    .message.error { color: #ffc2c9; background: #3b2025; }
+
+    .empty {
+      text-align: center;
+      padding: 65px 20px;
+      color: var(--muted);
+      border: 1px dashed var(--border);
+      border-radius: 15px;
+    }
+
+    @media (max-width: 600px) {
+      main { width: min(100% - 28px, 1250px); padding-top: 22px; }
+      .toolbar { align-items: stretch; }
+      .login { margin-top: 25px; padding: 24px; }
+      .card { padding: 18px; }
+      .actions > * { flex: 1 1 auto; }
+    }
+  </style>
+</head>
+
+<body>
+  <main>
+    <header>
+      <div>
+        <div class="brand">✂ BARBERÍA VIP</div>
+        <h1>Gestión de citas</h1>
+        <span id="connection" role="status">Acceso del propietario</span>
+      </div>
+
+      <button id="logoutButton" hidden>Cerrar sesión</button>
+    </header>
+
+    <div id="message" class="message" role="status" aria-live="polite"></div>
+
+    <section id="loginSection" class="login">
+      <h2>Bienvenido de vuelta</h2>
+      <p class="muted">Ingresa con la cuenta del propietario.</p>
+
+      <form id="loginForm">
+        <label>
+          Correo electrónico
+          <input id="email" type="email" required autocomplete="username">
+        </label>
+
+        <label>
+          Contraseña
+          <input id="password" type="password" required autocomplete="current-password">
+        </label>
+
+        <button id="loginButton" class="primary" type="submit">Entrar al panel</button>
+      </form>
+    </section>
+
+    <section id="dashboard" hidden>
+      <div class="toolbar">
+        <div class="stats">
+          <span><strong id="totalCount">0</strong>Total</span>
+          <span><strong id="pendingCount">0</strong>Pendientes</span>
+          <span><strong id="doneCount">0</strong>Completadas</span>
+        </div>
+
+        <div class="actions" style="border:0;padding:0">
+          <button id="soundButton" aria-pressed="false">Activar sonido</button>
+          <button id="refreshButton">Actualizar</button>
+        </div>
+      </div>
+
+      <p class="muted">Reservas ordenadas por fecha de creación, de más reciente a más antigua.</p>
+      <p id="emptyState" class="empty" hidden>No hay citas registradas.</p>
+      <div id="appointments" class="grid" aria-busy="false"></div>
+    </section>
+  </main>
+
+  <!-- El WAV se genera localmente; no depende de un archivo de audio externo. -->
+  <audio id="notificationAudio" preload="auto"></audio>
+
+  <script>
+    "use strict";
+
+    // REEMPLAZA ESTOS DOS VALORES EN AMBOS HTML.
+    const SUPABASE_URL = "SUPABASE_URL";
+    const SUPABASE_ANON_KEY = "SUPABASE_ANON_KEY";
+
+    const $ = id => document.getElementById(id);
+
+    let db = null;
+    let channel = null;
+    let started = false;
+    let soundEnabled = false;
+    let loading = false;
+    let reloadRequested = false;
+    let queuedEvents = [];
+    let rows = new Map();
+
+    // Evita alertas repetidas si Realtime entrega de nuevo un INSERT.
+    const notified = new Set();
+    const busyIds = new Set();
+
+    function showMessage(text, error = false) {
+      $("message").textContent = text;
+      $("message").className = "message" + (error ? " error" : "");
+    }
+
+    function setConnection(text, live = false) {
+      $("connection").textContent = text;
+      $("connection").className = live ? "live" : "";
+    }
+
+    function createNotificationSound() {
+      const sampleRate = 16000;
+      const duration = 0.45;
+      const count = Math.floor(sampleRate * duration);
+      const buffer = new ArrayBuffer(44 + count * 2);
+      const view = new DataView(buffer);
+
+      function writeText(offset, value) {
+        for (let i = 0; i < value.length; i++) {
+          view.setUint8(offset + i, value.charCodeAt(i));
+        }
+      }
+
+      writeText(0, "RIFF");
+      view.setUint32(4, 36 + count * 2, true);
+      writeText(8, "WAVE");
+      writeText(12, "fmt ");
+      view.setUint32(16, 16, true);
+      view.setUint16(20, 1, true);
+      view.setUint16(22, 1, true);
+      view.setUint32(24, sampleRate, true);
+      view.setUint32(28, sampleRate * 2, true);
+      view.setUint16(32, 2, true);
+      view.setUint16(34, 16, true);
+      writeText(36, "data");
+      view.setUint32(40, count * 2, true);
+
+      for (let i = 0; i < count; i++) {
+        const t = i / sampleRate;
+        const frequency = t < 0.22 ? 740 : 988;
+        const envelope = Math.min(1, t * 80) * (1 - t / duration);
+        const sample = Math.sin(2 * Math.PI * frequency * t) * envelope * 0.28;
+        view.setInt16(44 + i * 2, Math.round(sample * 32767), true);
+      }
+
+      return URL.createObjectURL(new Blob([buffer], { type: "audio/wav" }));
+    }
+
+    const soundURL = createNotificationSound();
+    $("notificationAudio").src = soundURL;
+
+    async function playNotification() {
+      const audio = $("notificationAudio");
+      audio.currentTime = 0;
+      await audio.play();
+    }
+
+    $("soundButton").addEventListener("click", async () => {
+      if (soundEnabled) {
+        soundEnabled = false;
+        $("notificationAudio").pause();
+      } else {
+        try {
+          // La interacción del usuario habilita la reproducción en el navegador.
+          await playNotification();
+          soundEnabled = true;
+        } catch (error) {
+          showMessage("El navegador bloqueó el audio. Revisa los permisos de sonido.", true);
+        }
+      }
+
+      $("soundButton").textContent = soundEnabled ? "Silenciar sonido" : "Activar sonido";
+      $("soundButton").setAttribute("aria-pressed", String(soundEnabled));
+    });
+
+    function formatDate(value) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(value || "")) return value || "—";
+      const [year, month, day] = value.split("-");
+      return `${day}/${month}/${year}`;
+    }
+
+    function formatCreated(value) {
+      const date = new Date(value);
+      return Number.isNaN(date.getTime())
+        ? "—"
+        : date.toLocaleString("es-MX", { dateStyle: "medium", timeStyle: "short" });
+    }
+
+    function element(tag, className, text) {
+      const node = document.createElement(tag);
+      if (className) node.className = className;
+      if (text !== undefined) node.textContent = text;
+      return node;
+    }
+
+    function addDetail(list, label, value) {
+      list.append(
+        element("dt", "", label),
+        element("dd", "", String(value ?? "—"))
+      );
+    }
+
+    function compareIdsDescending(a, b) {
+      try {
+        const left = BigInt(a.id);
+        const right = BigInt(b.id);
+        return left === right ? 0 : left > right ? -1 : 1;
+      } catch {
+        return String(b.id).localeCompare(String(a.id));
+      }
+    }
+
+    function render() {
+      const appointments = [...rows.values()].sort((a, b) => {
+        const timeA = Date.parse(a.created_at) || 0;
+        const timeB = Date.parse(b.created_at) || 0;
+        return timeB - timeA || compareIdsDescending(a, b);
+      });
+
+      $("totalCount").textContent = appointments.length;
+      $("pendingCount").textContent =
+        appointments.filter(row => row.estado === "Pendiente").length;
+      $("doneCount").textContent =
+        appointments.filter(row => row.estado === "Completada").length;
+
+      $("emptyState").hidden = appointments.length > 0 || loading;
+
+      const fragment = document.createDocumentFragment();
+
+      for (const appointment of appointments) {
+        const id = String(appointment.id);
+        const completed = appointment.estado === "Completada";
+        const busy = busyIds.has(id);
+
+        const card = element("article", "card");
+        const head = element("div", "card-head");
+        const title = element("div");
+        title.append(
+          element("h2", "", appointment.cliente || "Sin nombre"),
+          element("div", "id", `Reserva #${id}`)
+        );
+
+        head.append(
+          title,
+          element("span", "badge" + (completed ? " done" : ""),
+            appointment.estado || "Pendiente")
+        );
+
+        const details = element("dl");
+        addDetail(details, "Teléfono", appointment.telefono);
+        addDetail(details, "Servicio", appointment.servicio);
+        addDetail(details, "Barbero", appointment.barbero);
+        addDetail(details, "Fecha", formatDate(appointment.fecha));
+        addDetail(details, "Hora", appointment.hora);
+
+        const actions = element("div", "actions");
+        const phone = String(appointment.telefono || "").replace(/\D/g, "");
+
+        if (/^[1-9]\d{7,14}$/.test(phone)) {
+          const text =
+            `Hola ${appointment.cliente}, te contactamos de Barbería VIP ` +
+            `por tu solicitud de ${appointment.servicio} con ${appointment.barbero} ` +
+            `para el ${formatDate(appointment.fecha)} a las ${appointment.hora}. ` +
+            `¿Nos confirmas tu asistencia?`;
+
+          const whatsapp = element("a", "button whatsapp", "WhatsApp");
+          whatsapp.href = `https://wa.me/${phone}?text=${encodeURIComponent(text)}`;
+          whatsapp.target = "_blank";
+          whatsapp.rel = "noopener noreferrer";
+          actions.append(whatsapp);
+        }
+
+        const completeButton = element("button", "", completed ? "Completada ✓" : "Completar");
+        completeButton.disabled = completed || busy;
+        completeButton.addEventListener("click", () => mutateAppointment(id, "complete"));
+
+        const deleteButton = element("button", "danger", "Eliminar");
+        deleteButton.disabled = busy;
+        deleteButton.addEventListener("click", () => {
+          if (confirm(`¿Eliminar la cita de ${appointment.cliente}? Esta acción es permanente.`)) {
+            void mutateAppointment(id, "delete");
+          }
+        });
+
+        actions.append(completeButton, deleteButton);
+
+        card.append(
+          head,
+          details,
+          actions,
+          element("p", "created", `Registrada: ${formatCreated(appointment.created_at)}`)
+        );
+
+        fragment.append(card);
+      }
+
+      // Los datos del cliente se insertan con textContent, nunca como HTML.
+      $("appointments").replaceChildren(fragment);
+    }
+
+    function applyEvent(payload) {
+      if (payload.eventType === "DELETE") {
+        rows.delete(String(payload.old.id));
+      } else if (payload.new && payload.new.id != null) {
+        rows.set(String(payload.new.id), payload.new);
+      }
+    }
+
+    function receiveEvent(payload) {
+      if (loading) {
+        queuedEvents.push(payload);
+      } else {
+        applyEvent(payload);
+        render();
+      }
+
+      if (payload.eventType === "INSERT") {
+        const id = String(payload.new.id);
+
+        if (!notified.has(id)) {
+          notified.add(id);
+          showMessage(`Nueva cita: ${payload.new.cliente || "Cliente"}.`);
+
+          if (soundEnabled) {
+            playNotification().catch(() => {
+              soundEnabled = false;
+              $("soundButton").textContent = "Activar sonido";
+              $("soundButton").setAttribute("aria-pressed", "false");
+              showMessage("Nueva cita recibida. Activa nuevamente el sonido para escuchar alertas.");
+            });
+          }
+        }
+      }
+    }
+
+    async function loadAppointments() {
+      if (loading) {
+        reloadRequested = true;
+        return;
+      }
+
+      loading = true;
+      queuedEvents = [];
+      $("appointments").setAttribute("aria-busy", "true");
+      $("refreshButton").disabled = true;
+      $("emptyState").hidden = true;
+
+      try {
+        const snapshot = new Map();
+        const pageSize = 500;
+
+        // Paginación para no quedarse únicamente con el límite inicial de filas.
+        for (let offset = 0; ; offset += pageSize) {
+          const { data, error } = await db
+            .from("citas")
+            .select("*")
+            .order("created_at", { ascending: false })
+            .order("id", { ascending: false })
+            .range(offset, offset + pageSize - 1);
+
+          if (error) throw error;
+
+          for (const row of data) snapshot.set(String(row.id), row);
+          if (data.length < pageSize) break;
+        }
+
+        rows = snapshot;
+
+        // Conserva cambios llegados mientras se obtenía la carga inicial.
+        for (const payload of queuedEvents) applyEvent(payload);
+
+        for (const id of rows.keys()) notified.add(id);
+      } catch (error) {
+        console.error("Error de lectura:", error);
+
+        // Mantén los eventos recibidos incluso si falla la consulta.
+        for (const payload of queuedEvents) applyEvent(payload);
+
+        showMessage(
+          "No se pudieron cargar las citas. Revisa la conexión y los permisos RLS.",
+          true
+        );
+      } finally {
+        queuedEvents = [];
+        loading = false;
+        $("appointments").setAttribute("aria-busy", "false");
+        $("refreshButton").disabled = false;
+        render();
+
+        if (reloadRequested) {
+          reloadRequested = false;
+          void loadAppointments();
+        }
+      }
+    }
+
+    async function mutateAppointment(id, action) {
+      if (busyIds.has(id)) return;
+
+      busyIds.add(id);
+      render();
+
+      try {
+        const query = action === "complete"
+          ? db.from("citas").update({ estado: "Completada" }).eq("id", id)
+          : db.from("citas").delete().eq("id", id);
+
+        // Verifica que la política RLS haya permitido modificar una fila.
+        const { data, error } = await query.select("*").single();
+        if (error) throw error;
+
+        const localEvent = action === "complete"
+          ? { eventType: "UPDATE", new: data }
+          : { eventType: "DELETE", old: { id: data.id } };
+
+        applyEvent(localEvent);
+        if (loading) queuedEvents.push(localEvent);
+
+        showMessage(action === "complete" ? "Cita completada." : "Cita eliminada.");
+      } catch (error) {
+        console.error("Error de modificación:", error);
+        showMessage(
+          "No se pudo confirmar el cambio. Actualiza la lista y revisa tus permisos.",
+          true
+        );
+      } finally {
+        busyIds.delete(id);
+        render();
+      }
+    }
+
+    async function startDashboard(session) {
+      if (started) return;
+      started = true;
+
+      $("loginSection").hidden = true;
+      $("dashboard").hidden = false;
+      $("logoutButton").hidden = false;
+      setConnection("Conectando con Realtime…");
+
+      await db.realtime.setAuth(session.access_token);
+
+      // Se registra la suscripción antes de obtener la carga inicial.
+      channel = db
+        .channel("vip-citas-admin")
+        .on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "citas" },
+          receiveEvent
+        )
+        .subscribe(status => {
+          if (status === "SUBSCRIBED") {
+            setConnection("● Conectado en tiempo real", true);
+
+            // También resincroniza tras una reconexión.
+            void loadAppointments();
+          } else if (
+            status === "CHANNEL_ERROR" ||
+            status === "TIMED_OUT" ||
+            status === "CLOSED"
+          ) {
+            setConnection("Sin conexión en vivo · intentando reconectar");
+          }
+        });
+
+      // Permite consultar citas aunque Realtime tarde en conectar.
+      void loadAppointments();
+    }
+
+    $("refreshButton").addEventListener("click", () => void loadAppointments());
+
+    $("loginForm").addEventListener("submit", async event => {
+      event.preventDefault();
+      if (!db) return;
+
+      $("loginButton").disabled = true;
+      $("loginButton").textContent = "Entrando…";
+      showMessage("");
+
+      try {
+        const { data, error } = await db.auth.signInWithPassword({
+          email: $("email").value.trim(),
+          password: $("password").value
+        });
+
+        if (error) throw error;
+
+        $("password").value = "";
+        await startDashboard(data.session);
+      } catch (error) {
+        console.error("Error de acceso:", error);
+        showMessage("No se pudo iniciar sesión. Revisa tus credenciales y conexión.", true);
+      } finally {
+        $("loginButton").disabled = false;
+        $("loginButton").textContent = "Entrar al panel";
+      }
+    });
+
+    $("logoutButton").addEventListener("click", async () => {
+      $("logoutButton").disabled = true;
+
+      try {
+        const { error } = await db.auth.signOut({ scope: "local" });
+        if (error) throw error;
+        location.reload();
+      } catch (error) {
+        showMessage("No se pudo cerrar la sesión. Inténtalo nuevamente.", true);
+        $("logoutButton").disabled = false;
+      }
+    });
+
+    async function initialize() {
+      try {
+        if (
+          SUPABASE_URL === "SUPABASE_URL" ||
+          SUPABASE_ANON_KEY === "SUPABASE_ANON_KEY"
+        ) {
+          throw new Error("Configura SUPABASE_URL y SUPABASE_ANON_KEY.");
+        }
+
+        if (!window.supabase) {
+          throw new Error("No se pudo cargar Supabase. Revisa tu conexión.");
+        }
+
+        db = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+        db.auth.onAuthStateChange((event, session) => {
+          if (event === "SIGNED_OUT") {
+            location.reload();
+          }
+
+          if (event === "TOKEN_REFRESHED" && session) {
+            // Se difiere para no ejecutar operaciones dentro del callback de Auth.
+            setTimeout(() => {
+              db.realtime.setAuth(session.access_token).catch(console.error);
+            }, 0);
+          }
+        });
+
+        const { data, error } = await db.auth.getSession();
+        if (error) throw error;
+
+        if (data.session) await startDashboard(data.session);
+      } catch (error) {
+        console.error(error);
+        showMessage(error.message || "No se pudo iniciar el panel.", true);
+      }
+    }
+
+    window.addEventListener("online", () => {
+      if (started) void loadAppointments();
+    });
+
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden && started) void loadAppointments();
+    });
+
+    window.addEventListener("pagehide", () => {
+      $("notificationAudio").pause();
+    });
+
+    void initialize();
+  </script>
+</body>
+</html>
